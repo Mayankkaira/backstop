@@ -68,9 +68,6 @@ func Load(path string) (Config, error) {
 	if v := strings.TrimSpace(os.Getenv("BACKSTOP_MODE")); v != "" {
 		cfg.Mode = v
 	}
-	if err := cfg.Validate(); err != nil {
-		return Config{}, err
-	}
 	return cfg, nil
 }
 

@@ -34,6 +34,9 @@ func run() error {
 		configPath  = flag.String("config", "", "path to a JSON config file")
 		mode        = flag.String("mode", "", "observe or cancel (overrides config)")
 		databaseURL = flag.String("database-url", "", "Postgres connection string (overrides config and env)")
+		minWaiters  = flag.Int("min-waiters", 0, "sessions queued behind one cork before acting (0 keeps config)")
+		minWaitSecs = flag.Int("min-wait-seconds", 0, "oldest wait age in seconds before acting (0 keeps config)")
+		growth      = flag.Float64("growth-factor", 0, "queue growth multiple required to act (0 keeps config)")
 		showVersion = flag.Bool("version", false, "print version and exit")
 		check       = flag.Bool("check", false, "verify configuration and connectivity, then exit")
 	)
@@ -57,10 +60,18 @@ func run() error {
 	if *databaseURL != "" {
 		cfg.DatabaseURL = *databaseURL
 	}
+	if *minWaiters > 0 {
+		cfg.MinWaiters = *minWaiters
+	}
+	if *minWaitSecs > 0 {
+		cfg.MinWaitSeconds = *minWaitSecs
+	}
+	if *growth > 0 {
+		cfg.GrowthFactor = *growth
+	}
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
-
 	log := newLogger(cfg.LogFormat)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

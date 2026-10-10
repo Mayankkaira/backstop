@@ -7,9 +7,9 @@ import (
 )
 
 type Sample struct {
-	At      time.Time
-	Waiters int
-	ByRoot  map[int32]int
+	At       time.Time
+	Waiters  int
+	QueueLen map[int32]int
 }
 
 type Trend struct {
@@ -22,26 +22,32 @@ func NewTrend(window time.Duration) *Trend {
 }
 
 func (t *Trend) Observe(snap pgstat.Snapshot, at time.Time) {
-	byRoot := snap.WaitersPerBlocker()
-	s := Sample{At: at, Waiters: len(snap.WaitingPIDs()), ByRoot: byRoot}
+	queue := make(map[int32]int)
+	for _, pid := range snap.CorkPIDs() {
+		queue[pid] = len(snap.Downstream(pid))
+	}
+	s := Sample{At: at, Waiters: len(snap.WaitingPIDs()), QueueLen: queue}
 	t.samples = append(t.samples, s)
 	t.prune(at)
 }
 
-func (t *Trend) Growth(root int32, current int, at time.Time) float64 {
+func (t *Trend) Growth(cork int32, current int, at time.Time) float64 {
 	cutoff := at.Add(-t.window)
 	baseline := -1
 	for _, s := range t.samples {
 		if s.At.Before(cutoff) {
 			continue
 		}
-		v := s.ByRoot[root]
+		v, ok := s.QueueLen[cork]
+		if !ok {
+			continue
+		}
 		if baseline < 0 || v < baseline {
 			baseline = v
 		}
 	}
 	if baseline < 0 {
-		return 1
+		return growthCeiling
 	}
 	if baseline == 0 {
 		if current > 0 {

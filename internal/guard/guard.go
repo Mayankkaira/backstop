@@ -9,7 +9,6 @@ import (
 )
 
 type Decision struct {
-	Action    bool
 	Allowed   bool
 	TargetPID int32
 	Reasons   []string
@@ -37,58 +36,46 @@ func (g *Guard) Inspect(snap pgstat.Snapshot, v detector.Verdict, now time.Time)
 	var reasons []string
 	allowed := true
 
-	root, ok := snap.Backends[v.RootPID]
+	target, ok := snap.Backends[v.TargetPID]
 	if !ok {
-		return Decision{Allowed: false, TargetPID: v.RootPID, Reasons: []string{"root pid no longer present"}}
+		return Decision{TargetPID: v.TargetPID, Reasons: []string{"target pid is no longer present"}}
 	}
 
-	if g.cfg.ProtectedPIDs[v.RootPID] {
+	if _, pending := snap.PendingStrong()[v.TargetPID]; !pending {
 		allowed = false
-		reasons = append(reasons, "root pid is on the protected list")
-	}
-	if g.cfg.ProtectedUsers[strings.ToLower(root.User)] {
-		allowed = false
-		reasons = append(reasons, "root user is protected: "+root.User)
-	}
-	if g.cfg.ProtectedApps[strings.ToLower(root.ApplicationName)] {
-		allowed = false
-		reasons = append(reasons, "root application is protected: "+root.ApplicationName)
-	}
-	if _, holds := snap.HeldExclusive()[v.RootPID]; !holds {
-		allowed = false
-		reasons = append(reasons, "root no longer holds the exclusive lock")
-	}
-	if g.cfg.IdentityTTL > 0 && root.BackendStart != nil {
-		if age := now.Sub(*root.BackendStart); age < 0 {
-			allowed = false
-			reasons = append(reasons, "root backend_start is in the future")
+		if v.TargetIdleInXact {
+			reasons = append(reasons, "idle-in-transaction holds its lock; cancelling the current query would not release it")
+		} else {
+			reasons = append(reasons, "target has no pending strong lock")
 		}
 	}
-	if last, seen := g.last[v.RootPID]; seen {
-		if now.Sub(last) < g.cfg.Cooldown {
-			allowed = false
-			reasons = append(reasons, "cooldown active for this root")
-		}
+	if g.cfg.ProtectedPIDs[v.TargetPID] {
+		allowed = false
+		reasons = append(reasons, "target pid is on the protected list")
+	}
+	if g.cfg.ProtectedUsers[strings.ToLower(target.User)] {
+		allowed = false
+		reasons = append(reasons, "target user is protected: "+target.User)
+	}
+	if g.cfg.ProtectedApps[strings.ToLower(target.ApplicationName)] {
+		allowed = false
+		reasons = append(reasons, "target application is protected: "+target.ApplicationName)
+	}
+	if target.BackendStart == nil {
+		allowed = false
+		reasons = append(reasons, "target has no backend_start for identity verification")
+	}
+	if last, seen := g.last[v.TargetPID]; seen && now.Sub(last) < g.cfg.Cooldown {
+		allowed = false
+		reasons = append(reasons, "cooldown active for this target")
 	}
 
 	if allowed {
 		reasons = append(reasons, "all rails passed")
 	}
-	return Decision{Allowed: allowed, TargetPID: v.RootPID, Reasons: reasons}
+	return Decision{Allowed: allowed, TargetPID: v.TargetPID, Reasons: reasons}
 }
 
 func (g *Guard) MarkActed(pid int32, at time.Time) {
 	g.last[pid] = at
-}
-
-func (g *Guard) IdentityFresh(snap pgstat.Snapshot, pid int32, now time.Time, ttl time.Duration) bool {
-	if ttl <= 0 {
-		return true
-	}
-	b, ok := snap.Backends[pid]
-	if !ok || b.BackendStart == nil {
-		return false
-	}
-	age := now.Sub(*b.BackendStart)
-	return age >= 0 && age < ttl
 }

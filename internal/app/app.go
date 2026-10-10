@@ -17,6 +17,8 @@ import (
 	"github.com/mayankkaira/backstop/internal/pgstat"
 )
 
+var errNotReady = errors.New("not ready")
+
 type App struct {
 	cfg       config.Config
 	log       *slog.Logger
@@ -58,10 +60,6 @@ func New(cfg config.Config, log *slog.Logger, pool *pgxpool.Pool, m *metrics.Met
 	}
 }
 
-func (a *App) Ping(ctx context.Context) error {
-	return a.pool.Ping(ctx)
-}
-
 func (a *App) Run(ctx context.Context) error {
 	a.log.Info("backstop started",
 		"mode", a.cfg.Mode,
@@ -92,14 +90,14 @@ func (a *App) cycle(ctx context.Context) {
 		return
 	}
 	a.metrics.CycleOK()
-	a.trend.Observe(snap, now)
 
 	waiters := len(snap.WaitingPIDs())
 	oldest := snap.OldestWaitSeconds(now)
-	blocked := len(snap.WaitersPerBlocker())
+	corks := len(snap.CorkPIDs())
 
 	v, spiral := a.detector.Evaluate(snap, now)
-	a.metrics.SetState(waiters, oldest, blocked, spiral)
+	a.trend.Observe(snap, now)
+	a.metrics.SetState(waiters, oldest, corks, spiral)
 	if !spiral {
 		return
 	}
@@ -107,26 +105,26 @@ func (a *App) cycle(ctx context.Context) {
 	a.metrics.SpiralDetected()
 	a.log.Warn("incipient lock queue spiral detected",
 		"reason", v.Reason,
-		"root_pid", v.RootPID,
-		"root_user", v.RootUser,
-		"root_app", v.RootApp,
-		"root_state", v.RootState,
+		"target_pid", v.TargetPID,
+		"target_user", v.TargetUser,
+		"target_app", v.TargetApp,
+		"target_state", v.TargetState,
+		"pending_lock", v.Pending,
 		"lock_mode", v.LockMode,
 		"relation", v.Relation,
 		"schema", v.Schema,
 		"waiters", v.Waiters,
-		"oldest_wait_seconds", round(v.OldestWaitSeconds),
+		"oldest_wait_seconds", round(v.OldestWaitSecs),
 		"growth", round(v.Growth),
 		"hot_traffic", v.HotTraffic,
-		"idle_in_transaction", v.RootIsIdleInXact,
-		"root_query", v.RootQuery,
+		"target_query", v.TargetQuery,
 	)
 
 	decision := a.guard.Inspect(snap, v, now)
 	if !decision.Allowed {
 		a.metrics.Action("blocked")
 		a.log.Warn("action withheld by safety rails",
-			"root_pid", v.RootPID,
+			"target_pid", v.TargetPID,
 			"reasons", decision.Reasons,
 		)
 		return
@@ -134,8 +132,8 @@ func (a *App) cycle(ctx context.Context) {
 
 	if a.cfg.Mode != config.ModeCancel {
 		a.metrics.Action("observed")
-		a.log.Info("observe mode: would cancel blocker",
-			"root_pid", v.RootPID,
+		a.log.Info("observe mode: would cancel the corking statement",
+			"target_pid", v.TargetPID,
 			"waiters", v.Waiters,
 			"lock_mode", v.LockMode,
 			"relation", v.Relation,
@@ -147,39 +145,30 @@ func (a *App) cycle(ctx context.Context) {
 }
 
 func (a *App) cancel(ctx context.Context, snap pgstat.Snapshot, v detector.Verdict, now time.Time) {
-	expected := snap.Backends[v.RootPID].BackendStart
-	if expected == nil {
+	expected := snap.Backends[v.TargetPID].BackendStart
+	current, err := a.collector.BackendIdentity(ctx, v.TargetPID)
+	if err != nil || current == nil || !current.Equal(*expected) {
 		a.metrics.Action("blocked")
-		a.log.Warn("action withheld: no backend_start for root", "root_pid", v.RootPID)
-		return
-	}
-	current, err := a.collector.BackendIdentity(ctx, v.RootPID)
-	if err != nil {
-		a.metrics.Action("failed")
-		a.log.Error("identity re-check failed, not acting", "root_pid", v.RootPID, "error", err)
-		return
-	}
-	if current == nil || !current.Equal(*expected) {
-		a.metrics.Action("blocked")
-		a.log.Warn("action withheld: backend identity changed (possible pid reuse)", "root_pid", v.RootPID)
+		a.log.Warn("action withheld: backend identity changed or unreadable (possible pid reuse)",
+			"target_pid", v.TargetPID, "error", err)
 		return
 	}
 
 	actCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	res, err := a.actuator.Cancel(actCtx, v.RootPID)
+	res, err := a.actuator.Cancel(actCtx, v.TargetPID)
 	if err != nil {
 		a.metrics.Action("failed")
-		a.log.Error("cancel failed", "root_pid", v.RootPID, "error", err)
+		a.log.Error("cancel failed", "target_pid", v.TargetPID, "error", err)
 		return
 	}
-	a.guard.MarkActed(v.RootPID, now)
+	a.guard.MarkActed(v.TargetPID, now)
 	a.metrics.Action("cancelled")
-	a.log.Warn("cancelled blocker holding exclusive lock",
-		"root_pid", res.PID,
+	a.log.Warn("cancelled corking statement, queue can drain",
+		"target_pid", res.PID,
 		"lock_mode", v.LockMode,
 		"relation", v.Relation,
-		"waiters", v.Waiters,
+		"waiters_freed", v.Waiters,
 	)
 }
 
@@ -193,15 +182,13 @@ func (a *App) Verify(ctx context.Context) error {
 	return nil
 }
 
-func round(f float64) float64 {
-	return float64(int(f*100)) / 100
-}
-
-var errNotReady = errors.New("not ready")
-
 func (a *App) Ready(ctx context.Context) error {
 	if err := a.Verify(ctx); err != nil {
 		return errors.Join(errNotReady, err)
 	}
 	return nil
+}
+
+func round(f float64) float64 {
+	return float64(int(f*100)) / 100
 }

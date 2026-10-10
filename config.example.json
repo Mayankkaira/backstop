@@ -1,0 +1,18 @@
+{
+  "database_url": "postgres://app:app@127.0.0.1:5432/backstop",
+  "mode": "observe",
+  "poll_interval_seconds": 1,
+  "min_waiters": 5,
+  "min_wait_seconds": 5,
+  "growth_factor": 2.0,
+  "growth_window_seconds": 10,
+  "identity_ttl_seconds": 5,
+  "cooldown_seconds": 60,
+  "max_rows_per_action": 1,
+  "require_hot_traffic": true,
+  "protected_pids": [],
+  "protected_users": ["postgres", "replication"],
+  "protected_apps": ["backstop", "pgbouncer"],
+  "metrics_addr": ":9104",
+  "log_format": "json"
+}

@@ -129,6 +129,22 @@ func (s Snapshot) HeldExclusive() map[int32]Lock {
 	return out
 }
 
+func (s Snapshot) CorkPIDs() []int32 {
+	set := make(map[int32]bool)
+	for pid := range s.PendingStrong() {
+		set[pid] = true
+	}
+	for pid := range s.HeldExclusive() {
+		set[pid] = true
+	}
+	out := make([]int32, 0, len(set))
+	for pid := range set {
+		out = append(out, pid)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
 func (s Snapshot) OldestWaitSeconds(at time.Time) float64 {
 	oldest := 0.0
 	for _, b := range s.Backends {

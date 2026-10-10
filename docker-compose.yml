@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: backstop-postgres
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: backstop
+    ports:
+      - "55432:5432"
+    command:
+      - postgres
+      - -c
+      - log_lock_waits=on
+      - -c
+      - deadlock_timeout=500ms
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d backstop"]
+      interval: 2s
+      timeout: 3s
+      retries: 20

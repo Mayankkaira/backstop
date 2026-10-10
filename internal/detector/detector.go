@@ -14,22 +14,22 @@ type Thresholds struct {
 }
 
 type Verdict struct {
-	Spiral             bool
-	RootPID            int32
-	RootUser           string
-	RootApp            string
-	RootState          string
-	RootQuery          string
-	LockMode           string
-	Relation           string
-	Schema             string
-	Waiters            int
-	OldestWaitSeconds  float64
-	Growth             float64
-	HotTraffic         bool
-	RootHoldsExclusive bool
-	RootIsIdleInXact   bool
-	Reason             string
+	Spiral           bool
+	TargetPID        int32
+	TargetUser       string
+	TargetApp        string
+	TargetState      string
+	TargetQuery      string
+	TargetIdleInXact bool
+	Pending          bool
+	LockMode         string
+	Relation         string
+	Schema           string
+	Waiters          int
+	OldestWaitSecs   float64
+	Growth           float64
+	HotTraffic       bool
+	Reason           string
 }
 
 type Detector struct {
@@ -42,31 +42,24 @@ func New(th Thresholds, trend *Trend) *Detector {
 }
 
 func (d *Detector) Evaluate(snap pgstat.Snapshot, at time.Time) (Verdict, bool) {
-	waiters := snap.WaitingPIDs()
-	if len(waiters) < d.th.MinWaiters {
+	if len(snap.WaitingPIDs()) < d.th.MinWaiters {
 		return Verdict{}, false
 	}
 
-	waiting := make(map[int32]bool, len(waiters))
-	for _, pid := range waiters {
-		waiting[pid] = true
-	}
+	pending := snap.PendingStrong()
+	held := snap.HeldExclusive()
 
-	roots := snap.WaitersPerBlocker()
 	best := Verdict{}
 	found := false
 
-	for pid := range roots {
-		if waiting[pid] {
-			continue
-		}
+	for _, pid := range snap.CorkPIDs() {
 		b, ok := snap.Backends[pid]
 		if !ok {
 			continue
 		}
-		lock, holds := snap.HeldExclusive()[pid]
-		if !holds {
-			continue
+		lock, isPending := pending[pid]
+		if !isPending {
+			lock = held[pid]
 		}
 		down := snap.Downstream(pid)
 		if len(down) < d.th.MinWaiters {
@@ -96,21 +89,21 @@ func (d *Detector) Evaluate(snap pgstat.Snapshot, at time.Time) (Verdict, bool) 
 			continue
 		}
 		v := Verdict{
-			Spiral:             true,
-			RootPID:            pid,
-			RootUser:           b.User,
-			RootApp:            b.ApplicationName,
-			RootState:          b.State,
-			RootQuery:          pgstat.CompactQuery(b.Query, 300),
-			LockMode:           lock.Mode,
-			Relation:           lock.RelationName,
-			Schema:             lock.SchemaName,
-			Waiters:            len(down),
-			OldestWaitSeconds:  oldest,
-			Growth:             growth,
-			HotTraffic:         hot,
-			RootHoldsExclusive: true,
-			RootIsIdleInXact:   b.State == "idle in transaction",
+			Spiral:           true,
+			TargetPID:        pid,
+			TargetUser:       b.User,
+			TargetApp:        b.ApplicationName,
+			TargetState:      b.State,
+			TargetQuery:      pgstat.CompactQuery(b.Query, 300),
+			TargetIdleInXact: b.State == "idle in transaction",
+			Pending:          isPending,
+			LockMode:         lock.Mode,
+			Relation:         lock.RelationName,
+			Schema:           lock.SchemaName,
+			Waiters:          len(down),
+			OldestWaitSecs:   oldest,
+			Growth:           growth,
+			HotTraffic:       hot,
 		}
 		if !found || v.Waiters > best.Waiters {
 			best = v
@@ -126,9 +119,11 @@ func (d *Detector) Evaluate(snap pgstat.Snapshot, at time.Time) (Verdict, bool) 
 }
 
 func reason(v Verdict) string {
-	head := "lock queue building behind one blocker"
-	if v.RootIsIdleInXact {
-		head = "idle-in-transaction session holding an exclusive lock while the queue builds"
+	if v.Pending {
+		return "schema change waiting for a strong lock is corking the queue"
 	}
-	return head
+	if v.TargetIdleInXact {
+		return "idle-in-transaction session holding a strong lock while the queue builds"
+	}
+	return "session holding a strong lock is corking the queue"
 }

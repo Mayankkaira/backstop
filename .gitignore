@@ -1,0 +1,7 @@
+bin/
+*.log
+*.out
+.env
+db.env
+snapshots/
+coverage.txt
